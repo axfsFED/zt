@@ -48,7 +48,6 @@ def list2strSequence(list_agr):
     return strSequence
 
 def backtest(adjust_days, SelectStocks, pmsName, moneyAmount):
-    #backtest 回测
     #使用PMS做回测
     #MoenyAssignStock: 资金配比function
     #pmsName:    PMS组合名称
@@ -107,7 +106,7 @@ def backtest(adjust_days, SelectStocks, pmsName, moneyAmount):
 
 def SelectStockStrategy(d, period_strategy, hold_stock_num):
     #选取股票策略
-    #返回日期和CodeList(code)
+    #返回d日选出的股票列表CodeList(code)
     strCurDay = d.strftime('%Y-%m-%d')
 
     #前一个交易日
@@ -165,19 +164,96 @@ def SelectStockStrategy(d, period_strategy, hold_stock_num):
     return code_list
 
 def is_to_buy(code, date):
-    _wsd = w.wsd(code, "close,maxupordown", "ED-11TD", date, "PriceAdj=F")
-    close = _wsd.Data[0]
-    maxupordown = _wsd.Data[1]
-    maxupordown.index(1) #涨停的索引位置
-    close
+    to_buy = False
+    _wsd = w.wsd(code, "open,close,low,high,maxupordown,volume,free_turn", "ED-10TD", date, "PriceAdj=F")
+    open_price =  _wsd.Data[0]
+    close = _wsd.Data[1]
+    low =  _wsd.Data[2]
+    high =  _wsd.Data[3]
+    maxupordown = _wsd.Data[4]
+    volume = _wsd.Data[5]
+    free_turn = _wsd.Data[6]
+    ever_maxup = False
+    if maxupordown.count(1) > 0:
+        ever_maxup = True
+    if ever_maxup:
+        maxup_mark = maxupordown.index(1) #第一个涨停的索引位置
+        while maxup_mark < len(maxupordown):
+            if low[maxup_mark] < high[maxup_mark]:#不是一字涨停
+                break
+            else:
+                maxup_mark = maxupordown[maxup_mark+1:-1].index(1)+maxup_mark+1
+        if maxup_mark == len(maxupordown)-1: #如果是当日涨停，返回false
+            return to_buy
+        con1 = True
+        for i in range(maxup_mark+1, len(low)):
+            if low[i] < close[maxup_mark]:
+                con1 = False
+        con2 = False
+        if open_price[maxup_mark+1] > high[maxup_mark] and low[maxup_mark+1] >= close[maxup_mark] and volume[maxup_mark+1]>2*volume[maxup_mark]:
+            con2 = True
+        con3 = False
+        if volume[-1]<=volume[maxup_mark+1]/3 and free_turn[-1]<free_turn[maxup_mark+1]/2:
+            con3 = True
+        if con1 and con2 and con3:
+            to_buy = True
+    return to_buy
     
 if __name__ == '__main__':
+    #组合信息
+    pmsName = "0"
+    cash_per_stock = 100000
+    commission_rate_buy = 0.0003
+    commission_rate_sell = 0.0003
     #启动WIND
     w.start()
     #基准指数
     index = '000001.SH'
     #当前时间
-    now = datetime.datetime.now() - datetime.timedelta(days=3)
+    now = datetime.datetime.now()
+    #上一个交易日
+    pre_tradeday = w.tdaysoffset(-1, now.strftime("%Y-%m-%d"), "").Data[0]
+    
+    date_str1 = pre_tradeday.strftime("%Y-%m-%d")
+    date_str2 = pre_tradeday.strftime("%Y%m%d")
+    #获取当前所有股票列表
+    target_list = w.wset("sectorconstituent","date="+date_str1+";sectorid=a001010100000000").Data[1] #当日标的成分
+    ipo_listdays_list = w.wss(target_list, "ipo_listdays","tradeDate="+date_str2).Data[0] # 获取当天标的成分的上市天数（自然日）
+    ipo_list_one_year = [True if (ipo_days > 365) else False for ipo_days in ipo_listdays_list] #判断标的成分是否上市满一年
+    
+    to_buy_list = []
+    for i in range(0,len(target_list)):
+        if not ipo_list_one_year[i]: #如果上市不满一年
+            continue
+        code = target_list[i]
+        print(code)
+        try:
+            if is_to_buy(code, date_str1):
+                to_buy_list.append(code)
+        except(BaseException):
+            print(BaseException)
+            continue
+    print(to_buy_list)
+    stock_num = len(to_buy_list)
+    #上传现金
+    w.wupf(pmsName, now.strftime("%Y%m%d"), "CNY", str(stock_num*cash_per_stock), "1","Direction=Long;CreditTrading=No;HedgeType=Spec;")
+    
+    #获取当天被选股票列表的开盘价
+    open_list = w.wss(to_buy_list, "open","tradeDate="+now.strftime("%Y%m%d")+";priceAdj=F;cycle=D").Data[0]
+    cost_price_list = []
+    hold_num_list = []
+    #计算每一只被选股票的持有数量和成本
+    for i in range(0,len(to_buy_list)):
+        hold_num = math.floor(cash_per_stock/open_list[i]/100)*100
+        cost_stock = hold_num*open_list[i]
+        calc_commissions = round(cost_stock*commission_rate_buy+0.001,2)
+        cost_commissions = calc_commissions if calc_commissions>5 else 5
+        cost_price = round((cost_stock+cost_commissions)/hold_num+0.0001, 3)
+        hold_num_list.append(hold_num)
+        cost_price_list.append(cost_price)
+    #上传交易流水数据
+    w.wupf(pmsName, now.strftime("%Y%m%d"), list2strSequence(to_buy_list), list2strSequence(hold_num_list), list2strSequence(cost_price_list),"Direction=Long;Method=BuySell;CreditTrading=No;type=flow")
+    '''
     #回测时间
     beginDay = (now - datetime.timedelta(days=100)).strftime("%Y-%m-%d")
     endDay = (now - datetime.timedelta(days=10)).strftime("%Y-%m-%d")
@@ -197,4 +273,5 @@ if __name__ == '__main__':
     adjust_days, SelectStocks = backtestSelectStock(beginDay, endDay, period_adjust, period_strategy, hold_stock_num)
     #回测
     backtest(adjust_days, SelectStocks, pmsName, moneyAmount)
+    '''
     print('Mission Complete!')
