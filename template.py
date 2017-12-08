@@ -254,36 +254,69 @@ def to_buy_list(date):
     ipo_list_one_year = [True if (
         ipo_days > 365) else False for ipo_days in ipo_listdays_list]  # 判断标的成分是否上市满一年
 
-    for i in range(0, len(target_list)):
+    total_num = len(target_list)
+    for i in range(0, total_num):
         if not ipo_list_one_year[i]:  # 如果上市不满一年
             continue
         code = target_list[i]
-        print(code)
+        print("%d/%d" % (i + 1, total_num))
         try:
             if is_to_buy(code, date_str1):
                 to_buy_list.append(code)
         except(BaseException):
             print(BaseException)
             continue
-    # 将选股结果插入数据
-    print(to_buy_list)
+    # 返回选股结果
     return to_buy_list
 
+#=========================================================================
+# 按照100000的资金，计算每一只股票的持仓数量和成本（考虑交易佣金）
+# 输入：日期，买入股票列表，每只股票额度
+# 输出：dataFrame-代码+持仓数量+持仓成本
+#=========================================================================
+
+
+def buyAssign(date, to_buy_list, cash_per_stock):
+
+    commission_rate_buy = 0.0003  # 买入佣金比例
+    date_str2 = date.strftime("%Y%m%d")
+    # 获取当天被选股票列表的开盘价
+    open_list = w.wss(to_buy_list, "open", "tradeDate=" +
+                      date_str2 + ";priceAdj=F;cycle=D").Data[0]
+    cost_price_list = []
+    shares_list = []
+    # 计算每一只被选股票的持有数量和成本
+    for i in range(0, len(to_buy_list)):
+        shares = math.floor(cash_per_stock / open_list[i] / 100) * 100
+        cost_stock = shares * open_list[i]
+        calc_commissions = round(cost_stock * commission_rate_buy + 0.001, 2)
+        cost_commissions = calc_commissions if calc_commissions > 5 else 5
+        cost_price = round(
+            (cost_stock + cost_commissions) / shares + 0.0001, 3)
+        shares_list.append(shares)
+        cost_price_list.append(cost_price)
+    to_buy_df = pd.DataFrame()
+    to_buy_df['security_code'] = to_buy_list
+    to_buy_df['shares'] = shares_list
+    to_buy_df['cost_price'] = cost_price_list
+    return to_buy_df
+
  #=========================================================================
- # 输入：日期
+ # 输入：日期，数据库引
  # 输出：平仓列表
  #=========================================================================
 
 
-def to_sell_list(date, engine):
+def to_sell_df(date, engine):
     date_str1 = date.strftime("%Y-%m-%d")
     date_str2 = date.strftime("%Y%m%d")
     adjust_period = 5
-    to_sell_list = []  # 当日卖出股票列表
     _wpf = w.wpf(pmsName, "PMS.HoldingDaily", "tradedate=" +
                  date_str2 + ";reportcurrency=CNY")
     long_positions = _wpf.Data[0]  # pms获取当前持仓信息
 
+    to_sell_df = pd.DataFrame(
+        columns=['buy_date', 'security_code', 'shares'])  # 当日卖出股票df, 建仓日期+代码+数量
     query_sql = """
       select * from $arg1
       """
@@ -291,67 +324,81 @@ def to_sell_list(date, engine):
     df = pd.read_sql_query(query_sql .substitute(
         arg1='zztk_hold'), engine)  # 配合pandas的方法读取数据库值，数据库获取当日持仓信息
 
-    buy_date = df['buy_date']
-    security_code = list(df['security_code'])
+    buy_date = list(df['buy_date'])
     security_code = list(df['security_code'])
 
-    for i in range(0, len(security_code)):
+    for i in range(0, len(buy_date)):
         tradeDays = w.tdayscount(buy_date[i], date_str1, "").Data[0][0]
         if tradeDays == adjust_period:
-            to_sell_list.append(security_code[i])
-    return to_sell_list, security_code
+            to_sell_df = to_sell_df.append(df.iloc[i])
+    return to_sell_df, security_code
+
+#=========================================================================
+# 计算单只股票卖出的佣金和印花税
+# 返回总卖出总费用
+#=========================================================================
 
 
-def adjust_position(pmsName, date, to_buy_list, to_sell_list, hold_list):
+def sellCost(price, shares, commission_rate_sell, stamp_duty_rate):
+    calc_commissions = round(price * shares * commission_rate_sell + 0.001, 2)
+    cost_commissions = calc_commissions if calc_commissions > 5 else 5
+    cost_stamp_duty = price * shares * stamp_duty_rate
+    return cost_commissions + cost_stamp_duty
+
+
+def adjust_position(pmsName, date, to_buy_list, hold_list, to_sell_df, cash_per_stock):
+    commission_rate_sell = 0.0003  # 卖出佣金
+    stamp_duty_rate = 0.001  # 印花税
     date_str1 = date.strftime("%Y-%m-%d")
     date_str2 = date.strftime("%Y%m%d")
 
-    # 求to_sell_list和to_buy_list的交集，去除to_buy_list和to_sell_list共同的部分
+    to_sell_list = list(to_sell_df['security_code'])
+    # 求to_sell_list和to_buy_list的交集，to_buy_list和to_sell_list分别去除共同的部分
     intersection = list(set(to_buy_list).intersection(set(to_sell_list)))
     to_buy_list = list(set(to_buy_list).difference(set(intersection)))
-    to_sell_list = list(set(to_sell_list).difference(set(intersection)))
+    to_buy_list = list(set(to_buy_list).difference(
+        set(hold_list)))  # to_buy_list去除hold_list中已经有的部分
 
-    # to_buy_list去除hold_list中已经有的部分
-    to_buy_list = list(set(to_buy_list).difference(set(hold_list)))
+    to_sell_list = list(set(to_sell_list).difference(set(intersection)))
+    to_sell_df[to_sell_df['security_code'].isin(to_buy_list)]
 
 #------------------------------------------------------------------------------ 以当日收盘价卖出股票
+    to_sell_list = list((to_sell_df["security_code"]))
+    to_sell_list_shares = list(to_sell_df["shares"])
+    to_sell_list_shares = [-s for s in to_sell_list_shares]
     close_list = w.wss(to_sell_list, "close", "tradeDate=" +
                        date_str2 + ";priceAdj=F;cycle=D").Data[0]
-    # 从数据库查询当前持仓信息，上传平仓流水，并计算可用余额
-
+    w.wupf(pmsName, date_str2, list2strSequence(to_sell_list), list2strSequence(to_sell_list_shares), list2strSequence(close_list),
+           "Direction=Long,Long;Method=BuySell,BuySell;CreditTrading=No,No;type=flow")
+    # 扣除卖出费用(佣金和印花税)
+    cost_of_sell = 0
+    for i in range(0, len(to_sell_list)):
+        cost_of_sell += sellCost(close_list[i], -to_sell_list_shares[i],
+                                 commission_rate_sell, stamp_duty_rate)
+    w.wupf(pmsName, date_str2, "CNY", str(-cost_of_sell), "1",
+           "Direction=Short;Method=BuySell;CreditTrading=No;type=flow")
+    
 #------------------------------------------------------------------------------ 以当日开盘价买入股票
     # 计算资金缺口，上传资金流水
+    to_buy_df = buyAssign(date, to_buy_list, cash_per_stock)
+    to_buy_list = to_buy_df['to_buy_list']
+    shares_list = to_buy_df['shares_list']
+    cost_price_list = to_buy_df['cost_price_list']
     stock_num = len(to_buy_list)
+
     w.wupf(pmsName, date_str2, "CNY", str(stock_num *
                                           cash_per_stock), "1", "Direction=Long;CreditTrading=No;HedgeType=Spec;")
-
-    # 获取当天被选股票列表的开盘价
-    open_list = w.wss(to_buy_list, "open", "tradeDate=" +
-                      date_str2 + ";priceAdj=F;cycle=D").Data[0]
-    cost_price_list = []
-    hold_num_list = []
-    # 计算每一只被选股票的持有数量和成本
-    for i in range(0, len(to_buy_list)):
-        hold_num = math.floor(cash_per_stock / open_list[i] / 100) * 100
-        cost_stock = hold_num * open_list[i]
-        calc_commissions = round(cost_stock * commission_rate_buy + 0.001, 2)
-        cost_commissions = calc_commissions if calc_commissions > 5 else 5
-        cost_price = round(
-            (cost_stock + cost_commissions) / hold_num + 0.0001, 3)
-        hold_num_list.append(hold_num)
-        cost_price_list.append(cost_price)
     # 上传交易流水数据
-    w.wupf(pmsName, date_str2, list2strSequence(to_buy_list), list2strSequence(hold_num_list),
+    w.wupf(pmsName, date_str2, list2strSequence(to_buy_list), list2strSequence(shares_list),
            list2strSequence(cost_price_list), "Direction=Long;Method=BuySell;CreditTrading=No;type=flow")
 #------------------------------------------------------------------------------ 更新持仓数据库
+
 
 if __name__ == '__main__':
     # 组合信息
     pmsName = "test"
     cash_per_stock = 100000  # 单只标的金额
-    commission_rate_buy = 0.0003  # 买入佣金
-    commission_rate_sell = 0.0003  # 卖出佣金
-    stamp_duty_rate = 0.001  # 印花税
+
     # 当前时间（每日下午4:30运行）
     now = datetime.datetime.now()
     date_str1 = now.strftime("%Y-%m-%d")
@@ -361,19 +408,20 @@ if __name__ == '__main__':
     engine = create_engine(
         'mysql+pymysql://root:root@localhost:3306/micro?charset=utf8')  # 用sqlalchemy创建mysql引擎
 #------------------------------------------------------------------------------ step1.选股，写入MySQL(zztk_result选股结果表)
+#     #pre_day = w.tdaysoffset(-1, now.strftime("%Y-%m-%d"), "").Data[0][0]
 #     to_buy_list = to_buy_list(now)
+#     print(to_buy_list)
 #     df = pd.DataFrame(columns=['date', 'selected_code'])
 #     df['date'] = [date_str1 for i in to_buy_list]
 #     df['selected_code'] = to_buy_list
-#
 #     df.to_sql('zztk_result', engine, if_exists='append', index=False,
 #               dtype={'date': String(20), 'selected_code': String(20)})  # 类型映射，增量入库
 #------------------------------------------------------------------------------ step2.当前持仓信息，以及满N日平仓(zztk_hold当前持仓表)列表
-    to_sell_list, hold_list = to_sell_list(now, engine)
+    to_sell_df, hold_list = to_sell_df(now, engine)
     print(hold_list)
-    print(to_sell_list)
+    print(to_sell_df)
 #------------------------------------------------------------------------------ step3.调整仓位
-    adjust_position(pmsName, now, to_buy_list, to_sell_list, hold_list)
+#     adjust_position(pmsName, now, to_buy_list, hold_list, to_sell_df, cash_per_stock)
 #------------------------------------------------------------------------------ finally.关闭wind接口，输出信息
     w.stop()
     print('Mission Complete!')
