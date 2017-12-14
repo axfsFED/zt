@@ -38,25 +38,23 @@ engine = create_engine(
 DBSession = sessionmaker(bind=engine)
 session = DBSession()
 
-# 插入记录
-zztk = ZZTK(selected_date='test', selected_code='test', buy_date='test',
-            buy_price=10, sell_date='test', sell_price=11, shares=100)
-try:
-    session.add(zztk)
-    session.commit()
-except gevent.Timeout:
-    session.invalidate()
-    raise
-except:
-    session.rollback()
-    raise
-
+# # 插入记录
+# zztk = ZZTK(selected_date='test', selected_code='test', buy_date='test',
+#             buy_price=10, sell_date='test', sell_price=11, shares=100)
+# try:
+#     session.add(zztk)
+#     session.commit()
+# except gevent.Timeout:
+#     session.invalidate()
+#     raise
+# except:
+#     session.rollback()
+#     raise
+#
 # 条件查询和更改
-hi = session.query(ZZTK).filter(ZZTK.ID == 1).all()
-for h in hi:
-    setattr(h, 'selected_code', 'updated')
-    session.commit()
-
-# 关闭Session和数据库引擎
-session.close()
-engine.dispose()
+hi = session.query(ZZTK).filter(ZZTK.buy_date <= '2017-12-07').all()
+if len(hi) > 0:
+    print(hi[0].ID)
+# for h in hi:
+#     setattr(h, 'selected_code', 'updated')
+#     session.commit()

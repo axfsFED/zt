@@ -27,6 +27,7 @@ import math
 from sqlalchemy import create_engine  # 导入数据库接口
 from sqlalchemy.types import String
 from string import Template
+from sqlUtils import py
 
 
 def list2strSequence(list_agr):
@@ -42,7 +43,7 @@ def list2strSequence(list_agr):
 #=========================================================================
 
 
-def is_to_buy(code, date):
+def is_selected(code, date):
     '''
     1、10天内出现过涨停（剔除一字涨停和上市未满1年的次新股），并且随后股价最低价一直高于涨停价；ever_maxup and con1
     2、涨停第二天跳空高开，并且全天最低价不低于之前的涨停价，涨停第二天成交量显著放大；con2
@@ -93,8 +94,8 @@ def is_to_buy(code, date):
 #=========================================================================
 
 
-def to_buy_list(date):
-    to_buy_list = []
+def selectStocks(date):
+    selected_Stocks = []
 
     date_str1 = date.strftime("%Y-%m-%d")
     date_str2 = date.strftime("%Y%m%d")
@@ -114,13 +115,13 @@ def to_buy_list(date):
         code = target_list[i]
         print("%d/%d" % (i + 1, total_num))
         try:
-            if is_to_buy(code, date_str1):
-                to_buy_list.append(code)
+            if is_selected(code, date_str1):
+                selected_Stocks.append(code)
         except(BaseException):
             print(BaseException)
             continue
     # 返回选股结果
-    return to_buy_list
+    return selected_Stocks
 
 #=========================================================================
 # 按照100000的资金，计算每一只股票的持仓数量和成本（考虑交易佣金）
@@ -157,33 +158,30 @@ def buyAssign(date, to_buy_list, cash_per_stock):
     return to_buy_df, total_cost
 
  #=========================================================================
- # 输入：日期，数据库引
- # 输出：要平仓股票的dateframe(buy_date,security_code,shares)，以及当前持仓
+ # 输入：日期，调仓换股周期, wind接口
+ # 输出：要平仓股票的dateframe，以及当前持仓
  #=========================================================================
 
 
-def to_sell_df(date, engine):
+def to_sell(date, preTday = w.tdaysoffset(-adjust_period, date_str1, "").Data[0][0], w):
     date_str1 = date.strftime("%Y-%m-%d")
-    date_str2 = date.strftime("%Y%m%d")
-    adjust_period = 5
+    preTday = w.tdaysoffset(-adjust_period, date_str1, "").Data[0][0]
+    to_sell_objects = py.session.query(py.ZZTK).filter(
+        py.ZZTK.buy_date <= preTday, py.ZZTK.shares > 0).all()
+    return to_sell_objects
 
-    to_sell_df = pd.DataFrame(
-        columns=['buy_date', 'security_code', 'shares'])  # 当日要卖出股票df, 建仓日期+代码+数量
-    query_sql = """
-      select * from $arg1 WHERE sell_date IS NULL
-      """
-    query_sql = Template(query_sql)  # template方法
-    df = pd.read_sql_query(query_sql .substitute(
-        arg1='zztk_hold_his'), engine)  # 配合pandas的方法读取数据库值，数据库获取当日持仓信息
 
-    buy_date = list(df['buy_date'])
-    security_code = list(df['security_code'])
-
-    for i in range(0, len(buy_date)):
-        tradeDays = w.tdayscount(buy_date[i], date_str1, "").Data[0][0]
-        if tradeDays >= adjust_period:
-            to_sell_df = to_sell_df.append(df.iloc[i])
-    return to_sell_df, security_code
+ #=========================================================================
+ # 输入：日期, wind接口,选股结果列表
+ # 输出：当日要买入的股票列表
+ #=========================================================================
+def to_buy(date, selected_stocks, adjust_period, w):
+    date_str1 = date.strftime("%Y-%m-%d")
+    preTday = w.tdaysoffset(-adjust_period, date_str1, "").Data[0][0]
+    lastTday = w.tdaysoffset(-1, date_str1, "").Data[0][0]
+    to_buy_objects = py.session.query(py.ZZTK).filter(
+        py.ZZTK.selected_date == lastTday, py.ZZTK.shares == 0).all()
+    return to_sell_objects
 
 #=========================================================================
 # 计算单只股票卖出的佣金和印花税
@@ -213,7 +211,8 @@ def adjust_position(pmsName, date, to_buy_list, hold_list, to_sell_df, cash_per_
         set(hold_list)))  # to_buy_list去除hold_list中已经有的部分
 
     to_sell_list = list(set(to_sell_list).difference(set(intersection)))
-    to_sell_df_filtered = to_sell_df[to_sell_df['security_code'].isin(to_sell_list)]
+    to_sell_df_filtered = to_sell_df[to_sell_df['security_code'].isin(
+        to_sell_list)]
 
 #------------------------------------------------------------------------------ 以当日收盘价卖出股票
     to_sell_list = list(to_sell_df_filtered["security_code"])
@@ -253,7 +252,7 @@ def adjust_position(pmsName, date, to_buy_list, hold_list, to_sell_df, cash_per_
             isOk = False
             return isOk
     #-----------------------------------------------------------------------------更新持仓数据库
-    
+
 
 #------------------------------------------------------------------------------ 以当日开盘价买入股票
     if len(to_buy_list) > 0:
@@ -279,7 +278,7 @@ def adjust_position(pmsName, date, to_buy_list, hold_list, to_sell_df, cash_per_
         df['buy_date'] = [date_str1 for i in to_buy_list]
         df['selected_code'] = to_buy_list
         df['shares'] = shares_list
-        df.to_sql('zztk_hold_his', engine, if_exists='append', index=False,
+        df.to_sql('zztk_hold_his', py.engine, if_exists='append', index=False,
                   dtype={'date': String(20), 'selected_code': String(20)})  # 类型映射，增量入库
     return isOk
 
@@ -287,38 +286,42 @@ def adjust_position(pmsName, date, to_buy_list, hold_list, to_sell_df, cash_per_
 if __name__ == '__main__':
     pmsName = "test"  # 组合信息
     cash_per_stock = 100000  # 单只标的金额
+    adjust_period = 5
 
-    # 当前时间（每日下午4:00运行）
+    # 当前时间（每日下午4:20运行）
     now = datetime.datetime.now()
     date_str1 = now.strftime("%Y-%m-%d")
     date_str2 = now.strftime("%Y%m%d")
 
     w.start()  # 启动WIND
-    engine = create_engine(
-        'mysql+pymysql://root:root@localhost:3306/micro?charset=utf8')  # 用sqlalchemy创建mysql引擎
 #------------------------------------------------------------------------------ step1.选股，写入MySQL(zztk_result选股结果表)
 #     #pre_day = w.tdaysoffset(-1, now.strftime("%Y-%m-%d"), "").Data[0][0]
 #     #date_str1 = pre_day.strftime("%Y-%m-%d")
- 
-    selected_codes = to_buy_list(now)
-    print(selected_codes)
-    df = pd.DataFrame(columns=['date', 'selected_code'])
-    df['date'] = [date_str1 for i in to_buy_list]
-    df['selected_code'] = to_buy_list
-    df.to_sql('zztk_result', engine, if_exists='append', index=False,
-              dtype={'date': String(20), 'selected_code': String(20)})  # 类型映射，增量入库
+#
+#     #selected_codes = to_buy_list(pre_day)
+#     selected_codes = ['001', '002']
+#     print(selected_codes)
+#     df = pd.DataFrame(columns=['selected_date', 'selected_code'])
+#     df['selected_date'] = [date_str1 for i in selected_codes]
+#     df['selected_code'] = selected_codes
+#     df['shares'] = [0 for i in selected_codes]
+#     df.to_sql('zztk', py.engine, if_exists='append', index=False,
+#               dtype={'date': String(20), 'selected_code': String(20)})  # 类型映射，增量入库
 #------------------------------------------------------------------------------ step2.当前持仓信息，以及满N日平仓(zztk_hold当前持仓表)列表
-    to_sell_df, hold_list = to_sell_df(now, engine)
-    print(hold_list)
-    print(to_sell_df)
+    to_sell_objects = to_sell(now, adjust_period, w)
+    print(to_sell_objects[0].buy_date)
 #------------------------------------------------------------------------------ step3.调整仓位
     isOk = True
-    to_buy_list = []
-    isOk = adjust_position(pmsName, now, to_buy_list, hold_list,
-                           to_sell_df, cash_per_stock)
+#     to_buy_list = []
+#     isOk = adjust_position(pmsName, now, to_buy_list, hold_list,
+#                            to_sell_df, cash_per_stock)
 #------------------------------------------------------------------------------ finally.关闭wind接口，输出信息
     w.stop()
     if not isOk:
         print("wrong!")
     else:
         print('Mission Complete!')
+
+    # 关闭Session和数据库引擎
+    py.session.close()
+    py.engine.dispose()
