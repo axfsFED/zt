@@ -29,8 +29,7 @@ class ZZTK(Base):
     sell_date = Column(String(20))
     sell_price = Column(Float)
     shares = Column(Integer)
-
-
+    
 engine = create_engine(
     'mysql+pymysql://root:root@localhost:3306/micro?charset=utf8')  # 用sqlalchemy创建mysql引擎
 
@@ -50,7 +49,7 @@ session = DBSession()
 # except:
 #     session.rollback()
 #     raise
-#
+
 # 条件查询和更改
 hi = session.query(ZZTK).filter(ZZTK.buy_date <= '2017-12-07').all()
 if len(hi) > 0:

@@ -3,13 +3,16 @@
 输入：wind平台数据
 输出：选股结果-->mysql数据库，调仓结果-->wind组合管理
 执行逻辑：
-每日下午4:30执行
+每日下午4:30执行选股写入数据库
+每日上午9:35执行建仓和调仓
+
 step1.选出当日满足条件股票
 step2.将前一日选出股票按照当日开盘价建仓
 step3.持仓满五天的进行平仓
 history
 v0.0-20171123, 主程序架构
 v0.1-20171207, 选股结果入库，次日建仓，定期调仓（平）
+v0.2-20171215, 选股结果入库，次日建仓，定期调仓（平）
 '''
 # 导入函数库
 from pylab import *
@@ -24,10 +27,9 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import numpy
 import math
-from sqlalchemy import create_engine  # 导入数据库接口
 from sqlalchemy.types import String
 from string import Template
-from sqlUtils import py
+from sqlUtils import *
 
 
 def list2strSequence(list_agr):
@@ -136,8 +138,8 @@ def buyAssign(date, to_buy_list, cash_per_stock):
     commission_rate_buy = 0.0003  # 买入佣金比例
     date_str2 = date.strftime("%Y%m%d")
     # 获取当天被选股票列表的开盘价
-    open_list = w.wss(to_buy_list, "open", "tradeDate=" +
-                      date_str2 + ";priceAdj=F;cycle=D").Data[0]
+    _wsq = w.wsq(list2strSequence(to_buy_list), "rt_open")
+    open_list = _wsq.Data[0]
     cost_price_list = []
     shares_list = []
     # 计算每一只被选股票的持有数量和成本
@@ -160,28 +162,34 @@ def buyAssign(date, to_buy_list, cash_per_stock):
  #=========================================================================
  # 输入：日期，调仓换股周期, wind接口
  # 输出：要平仓股票的dateframe，以及当前持仓
+ # 从mysql数据库中查询出来当日要清仓的股票对象
  #=========================================================================
 
 
-def to_sell(date, preTday = w.tdaysoffset(-adjust_period, date_str1, "").Data[0][0], w):
+def to_sell(date, adjust_period, w):
     date_str1 = date.strftime("%Y-%m-%d")
-    preTday = w.tdaysoffset(-adjust_period, date_str1, "").Data[0][0]
-    to_sell_objects = py.session.query(py.ZZTK).filter(
-        py.ZZTK.buy_date <= preTday, py.ZZTK.shares > 0).all()
+    preTday = w.tdaysoffset(-adjust_period, date_str1,
+                            "").Data[0][0].strftime("%Y-%m-%d")
+    to_sell_objects = session.query(ZZTK).filter(
+        ZZTK.buy_date <= preTday, ZZTK.shares > 0).all()
     return to_sell_objects
-
 
  #=========================================================================
  # 输入：日期, wind接口,选股结果列表
  # 输出：当日要买入的股票列表
+ # 从mysql数据库中查询出当日要买入的股票对象
  #=========================================================================
-def to_buy(date, selected_stocks, adjust_period, w):
+
+
+def to_buy(date, adjust_period, w):
     date_str1 = date.strftime("%Y-%m-%d")
-    preTday = w.tdaysoffset(-adjust_period, date_str1, "").Data[0][0]
-    lastTday = w.tdaysoffset(-1, date_str1, "").Data[0][0]
-    to_buy_objects = py.session.query(py.ZZTK).filter(
-        py.ZZTK.selected_date == lastTday, py.ZZTK.shares == 0).all()
-    return to_sell_objects
+    preTday = w.tdaysoffset(-adjust_period, date_str1,
+                            "").Data[0][0].strftime("%Y-%m-%d")
+    lastTday = w.tdaysoffset(-1, date_str1, "").Data[0][0].strftime("%Y-%m-%d")
+    to_buy_objects = session.query(ZZTK).filter(
+        ZZTK.selected_date == lastTday, ZZTK.shares == 0).all()
+    return to_buy_objects
+
 
 #=========================================================================
 # 计算单只股票卖出的佣金和印花税
@@ -196,43 +204,44 @@ def sellCost(price, shares, commission_rate_sell, stamp_duty_rate):
     return cost_commissions + cost_stamp_duty
 
 
-def adjust_position(pmsName, date, to_buy_list, hold_list, to_sell_df, cash_per_stock):
+def adjust_position(pmsName, date, to_buy_objects, to_sell_objects, cash_per_stock):
     isOk = True
     commission_rate_sell = 0.0003  # 卖出佣金
     stamp_duty_rate = 0.001  # 印花税
     date_str1 = date.strftime("%Y-%m-%d")
     date_str2 = date.strftime("%Y%m%d")
 
-    to_sell_list = list(to_sell_df['security_code'])
-    # 求to_sell_list和to_buy_list的交集，to_buy_list和to_sell_list分别去除共同的部分
-    intersection = list(set(to_buy_list).intersection(set(to_sell_list)))
-    to_buy_list = list(set(to_buy_list).difference(set(intersection)))
-    to_buy_list = list(set(to_buy_list).difference(
-        set(hold_list)))  # to_buy_list去除hold_list中已经有的部分
+    selected_date_list = []
+    selected_code_list = []
+    buy_date_list = []
+    buy_price_list = []
+    sell_date_list = []
+    sell_price_list = []
+    shares_list = []
 
-    to_sell_list = list(set(to_sell_list).difference(set(intersection)))
-    to_sell_df_filtered = to_sell_df[to_sell_df['security_code'].isin(
-        to_sell_list)]
+    for o in to_sell_objects:
+        selected_date_list.append(o.selected_date)
+        selected_code_list.append(o.selected_code)
+        buy_date_list.append(o.buy_date)
+        buy_price_list.append(o.buy_price)
+        sell_date_list.append(o.sell_date)
+        sell_price_list.append(o.sell_price)
+        shares_list.append(o.shares)
 
-#------------------------------------------------------------------------------ 以当日收盘价卖出股票
-    to_sell_list = list(to_sell_df_filtered["security_code"])
-    if len(to_sell_list) > 0:
+#------------------------------------------------------------------------------ 以当日开盘价卖出股票
+    if len(selected_code_list) > 0:
         print("今日卖出股票")
-        print(to_sell_list)
-        to_sell_list_shares = list(to_sell_df_filtered["shares"])
-        to_sell_list_shares = [-s for s in to_sell_list_shares]
-        _wss = w.wss(to_sell_list, "close", "tradeDate=" +
-                     date_str2 + ";priceAdj=F;cycle=D")
-        if _wss.ErrorCode != 0 or _wss.Data[0][0] is None:
+        print(selected_code_list)
+        shares_list = [-s for s in shares_list]
+        _wsq = w.wsq(list2strSequence(selected_code_list), "rt_open")
+        if _wsq.ErrorCode != 0 or _wsq.Data[0][0] is None:
             print("b1")
-            print(_wss.ErrorCode)
+            print(_wsq.ErrorCode)
             isOk = False
             return isOk
-        close_list = _wss.Data[0]
-        print(list2strSequence(to_sell_list))
-        print(list2strSequence(to_sell_list_shares))
-        print(list2strSequence(close_list))
-        _wupf = w.wupf(pmsName, date_str2, list2strSequence(to_sell_list), list2strSequence(to_sell_list_shares), list2strSequence(close_list),
+        open_price_list = _wsq.Data[0]
+
+        _wupf = w.wupf(pmsName, date_str2, list2strSequence(selected_code_list), list2strSequence(shares_list), list2strSequence(open_price_list),
                        "Direction=Long;Method=BuySell;CreditTrading=No;type=flow")
         if _wupf.ErrorCode != 0:
             print("b2")
@@ -241,8 +250,8 @@ def adjust_position(pmsName, date, to_buy_list, hold_list, to_sell_df, cash_per_
             return isOk
         # 扣除卖出费用(佣金和印花税)
         cost_of_sell = 0
-        for i in range(0, len(to_sell_list)):
-            cost_of_sell += sellCost(close_list[i], -to_sell_list_shares[i],
+        for i in range(0, len(open_price_list)):
+            cost_of_sell += sellCost(open_price_list[i], -shares_list[i],
                                      commission_rate_sell, stamp_duty_rate)
         _wupf = w.wupf(pmsName, date_str2, "CNY", str(-cost_of_sell), "1",
                        "Direction=Short;Method=BuySell;CreditTrading=No;type=flow")
@@ -251,15 +260,36 @@ def adjust_position(pmsName, date, to_buy_list, hold_list, to_sell_df, cash_per_
             print(_wupf.ErrorCode)
             isOk = False
             return isOk
-    #-----------------------------------------------------------------------------更新持仓数据库
+        #-----------------------------------------------------------------------------更新数据库
+        for i in range(0, len(to_sell_objects)):
+            setattr(to_sell_objects[i], 'sell_date', date_str1)
+            setattr(to_sell_objects[i], 'sell_price', open_price_list[i])
+            setattr(to_sell_objects[i], 'shares', 0)
+            session.commit()
 
+    selected_date_list = []
+    selected_code_list = []
+    buy_date_list = []
+    buy_price_list = []
+    sell_date_list = []
+    sell_price_list = []
+    shares_list = []
 
+    for o in to_buy_objects:
+        selected_date_list.append(o.selected_date)
+        selected_code_list.append(o.selected_code)
+        buy_date_list.append(o.buy_date)
+        buy_price_list.append(o.buy_price)
+        sell_date_list.append(o.sell_date)
+        sell_price_list.append(o.sell_price)
+        shares_list.append(o.shares)
 #------------------------------------------------------------------------------ 以当日开盘价买入股票
-    if len(to_buy_list) > 0:
+    if len(selected_code_list) > 0:
         print("今日买入股票")
-        print(to_buy_list)
+        print(selected_code_list)
         # 计算资金缺口，上传资金流水
-        to_buy_df, total_cost = buyAssign(date, to_buy_list, cash_per_stock)
+        to_buy_df, total_cost = buyAssign(
+            date, selected_code_list, cash_per_stock)
         to_buy_list = list(to_buy_df['security_code'])
         shares_list = list(to_buy_df['shares'])
         cost_price_list = list(to_buy_df['cost_price'])
@@ -274,12 +304,11 @@ def adjust_position(pmsName, date, to_buy_list, hold_list, to_sell_df, cash_per_
         w.wupf(pmsName, date_str2, list2strSequence(to_buy_list), list2strSequence(shares_list),
                list2strSequence(cost_price_list), "Direction=Long;Method=BuySell;CreditTrading=No;type=flow")
     #------------------------------------------------------------------------------ 更新持仓数据库
-        df = pd.DataFrame(columns=['buy_date', 'selected_code', 'shares'])
-        df['buy_date'] = [date_str1 for i in to_buy_list]
-        df['selected_code'] = to_buy_list
-        df['shares'] = shares_list
-        df.to_sql('zztk_hold_his', py.engine, if_exists='append', index=False,
-                  dtype={'date': String(20), 'selected_code': String(20)})  # 类型映射，增量入库
+        for i in range(0, len(to_buy_objects)):
+            setattr(to_sell_objects[i], 'buy_date', date_str1)
+            setattr(to_sell_objects[i], 'buy_price', cost_price_list[i])
+            setattr(to_sell_objects[i], 'shares', shares_list[i])
+            session.commit()
     return isOk
 
 
@@ -295,33 +324,27 @@ if __name__ == '__main__':
 
     w.start()  # 启动WIND
 #------------------------------------------------------------------------------ step1.选股，写入MySQL(zztk_result选股结果表)
-#     #pre_day = w.tdaysoffset(-1, now.strftime("%Y-%m-%d"), "").Data[0][0]
-#     #date_str1 = pre_day.strftime("%Y-%m-%d")
-#
-#     #selected_codes = to_buy_list(pre_day)
-#     selected_codes = ['001', '002']
-#     print(selected_codes)
-#     df = pd.DataFrame(columns=['selected_date', 'selected_code'])
-#     df['selected_date'] = [date_str1 for i in selected_codes]
-#     df['selected_code'] = selected_codes
-#     df['shares'] = [0 for i in selected_codes]
-#     df.to_sql('zztk', py.engine, if_exists='append', index=False,
-#               dtype={'date': String(20), 'selected_code': String(20)})  # 类型映射，增量入库
+    pre_day = w.tdaysoffset(-1, now.strftime("%Y-%m-%d"), "").Data[0][0]
+    date_str1 = pre_day.strftime("%Y-%m-%d")
+
+    selected_codes = selectStocks(pre_day)
+    print(selected_codes)
+    df = pd.DataFrame(columns=['selected_date', 'selected_code'])
+    df['selected_date'] = [date_str1 for i in selected_codes]
+    df['selected_code'] = selected_codes
+    df['shares'] = [0 for i in selected_codes]
+    df.to_sql('zztk', engine, if_exists='append', index=False,
+              dtype={'date': String(20), 'selected_code': String(20)})  # 类型映射，增量入库
 #------------------------------------------------------------------------------ step2.当前持仓信息，以及满N日平仓(zztk_hold当前持仓表)列表
     to_sell_objects = to_sell(now, adjust_period, w)
-    print(to_sell_objects[0].buy_date)
+    to_buy_objects = to_buy(now, adjust_period, w)
 #------------------------------------------------------------------------------ step3.调整仓位
     isOk = True
-#     to_buy_list = []
-#     isOk = adjust_position(pmsName, now, to_buy_list, hold_list,
-#                            to_sell_df, cash_per_stock)
+    isOk = adjust_position(pmsName, now, to_buy_objects,
+                           to_sell_objects, cash_per_stock)
 #------------------------------------------------------------------------------ finally.关闭wind接口，输出信息
-    w.stop()
     if not isOk:
         print("wrong!")
     else:
         print('Mission Complete!')
-
-    # 关闭Session和数据库引擎
-    py.session.close()
-    py.engine.dispose()
+    w.stop()
