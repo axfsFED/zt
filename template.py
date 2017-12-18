@@ -336,12 +336,12 @@ if __name__ == '__main__':
     df.to_sql('zztk', engine, if_exists='append', index=False,
               dtype={'date': String(20), 'selected_code': String(20)})  # 类型映射，增量入库
 #------------------------------------------------------------------------------ step2.当前持仓信息，以及满N日平仓(zztk_hold当前持仓表)列表
-    to_sell_objects = to_sell(now, adjust_period, w)
-    to_buy_objects = to_buy(now, adjust_period, w)
+#     to_sell_objects = to_sell(now, adjust_period, w)
+#     to_buy_objects = to_buy(now, adjust_period, w)
 #------------------------------------------------------------------------------ step3.调整仓位
     isOk = True
-    isOk = adjust_position(pmsName, now, to_buy_objects,
-                           to_sell_objects, cash_per_stock)
+#     isOk = adjust_position(pmsName, now, to_buy_objects,
+#                            to_sell_objects, cash_per_stock)
 #------------------------------------------------------------------------------ finally.关闭wind接口，输出信息
     if not isOk:
         print("wrong!")
