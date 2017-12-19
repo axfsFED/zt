@@ -31,6 +31,34 @@ from sqlalchemy.types import String
 from string import Template
 from sqlUtils import *
 
+from sqlalchemy import *  # 注1
+import sqlite3
+
+#------------------------------------------------------------------------------ 创建数据库引擎
+engine = create_engine('sqlite:///Stocks_Market_Data_Wind.db', echo=False)
+metadata = MetaData(engine)
+conn = sqlite3.connect('Stocks_Market_Data_Wind.db')
+cur = conn.cursor()
+
+
+def _template(table_name, metadata):
+    return Table(table_name, metadata,
+                 Column('date', String(20), primary_key=True),
+                 Column('open', Float),
+                 Column('high', Float),
+                 Column('close', Float),
+                 Column('low', Float),
+                 Column('volume', Float),
+                 Column('price_change', Float),
+                 Column('p_change', Float),
+                 Column('ma5', Float),
+                 Column('ma10', Float),
+                 Column('ma20', Float),
+                 Column('v_ma5', Float),
+                 Column('v_ma10', Float),
+                 Column('v_ma20', Float),
+                 Column('turnover', Float))
+
 
 def list2strSequence(list_agr):
     list_str = [str(l) for l in list_agr]
@@ -43,8 +71,6 @@ def list2strSequence(list_agr):
 # 输入：日期和股票
 # 返回：该股票当日是否满足选股条件
 #=========================================================================
-
-
 def is_selected(code, date):
     '''
     1、10天内出现过涨停（剔除一字涨停和上市未满1年的次新股），并且随后股价最低价一直高于涨停价；ever_maxup and con1
@@ -311,30 +337,85 @@ def adjust_position(pmsName, date, to_buy_objects, to_sell_objects, cash_per_sto
             session.commit()
     return isOk
 
+#=========================================================================
+# 初始化行情数据库
+#=========================================================================
+
+
+def init(start_date, end_date, engine):
+    target_list = w.wset("sectorconstituent", "date=" +
+                         end_date + ";sectorid=a001010100000000").Data[1]  # 当日标的成分
+    # 获取数据并存入sqllite数据库
+    start_date = w.tdaysoffset(-10, start_date, "").Data[0][0]
+    for code in target_list:
+        _wsd = w.wsd(code, "open,close,low,high,maxupordown,volume,free_turn",
+                     start_date, end_date, "PriceAdj=F")
+        if _wsd.ErrorCode != 0:
+            print("%s: Error!"%(code))
+        else:
+            df_stock = pd.DataFrame(_wsd.Data, index=_wsd.Fields,columns=_wsd.Times)
+            df_stock = df_stock.T
+            if df_stock is not None:
+                df_stock.to_sql(code, engine, if_exists='replace')
+                
+#=========================================================================
+# 每日更新行情数据库
+#=========================================================================
+
+
+def update(start_date, end_date, engine):
+    target_list = w.wset("sectorconstituent", "date=" +
+                         end_date + ";sectorid=a001010100000000").Data[1]  # 当日标的成分
+    # 获取数据并存入sqllite数据库
+    start_date = w.tdaysoffset(-10, start_date, "").Data[0][0]
+    for code in target_list:
+        _wsd = w.wsd(code, "open,close,low,high,maxupordown,volume,free_turn",
+                     start_date, end_date, "PriceAdj=F")
+        if _wsd.ErrorCode != 0:
+            print("%s: Error!"%(code))
+        else:
+            df_stock = pd.DataFrame(_wsd.Data, index=_wsd.Fields,columns=_wsd.Times)
+            df_stock = df_stock.T
+            if df_stock is not None:
+                df_stock.to_sql(code, engine, if_exists='append')
+                
+                
 
 if __name__ == '__main__':
     pmsName = "test"  # 组合信息
     cash_per_stock = 100000  # 单只标的金额
     adjust_period = 5
 
+    # 回测开始时间
+    start_date = '2017-12-01'
+    end_date = '2017-12-18'
     # 当前时间（每日下午4:20运行）
     now = datetime.datetime.now()
     date_str1 = now.strftime("%Y-%m-%d")
     date_str2 = now.strftime("%Y%m%d")
-
     w.start()  # 启动WIND
-#------------------------------------------------------------------------------ step1.选股，写入MySQL(zztk_result选股结果表)
-    pre_day = w.tdaysoffset(-1, now.strftime("%Y-%m-%d"), "").Data[0][0]
-    date_str1 = pre_day.strftime("%Y-%m-%d")
-
-    selected_codes = selectStocks(pre_day)
-    print(selected_codes)
-    df = pd.DataFrame(columns=['selected_date', 'selected_code'])
-    df['selected_date'] = [date_str1 for i in selected_codes]
-    df['selected_code'] = selected_codes
-    df['shares'] = [0 for i in selected_codes]
-    df.to_sql('zztk', engine, if_exists='append', index=False,
-              dtype={'date': String(20), 'selected_code': String(20)})  # 类型映射，增量入库
+    query = "SELECT count(*) FROM sqlite_master WHERE type='table'"
+    if cur.execute(query).fetchone()[0] == 0:  # 如果数据库为空，初始化数据库
+        init(start_date, end_date, engine)
+    else:
+        # update(start_date, end_date, engine) # 每日更新数据库
+        pass
+    # 获取期间交易日期
+    tradeDays = w.tdays(start_date, "2017-12-18", "").Data[0]
+    for t in tradeDays:
+        #------------------------------------------------------------------------------ step1.选股，写入MySQL(zztk_result选股结果表)
+        date_str1 = t.strftime("%Y-%m-%d")  
+        # 获取当前所有股票列表
+        target_list = w.wset("sectorconstituent", "date=" +
+                         date_str1 + ";sectorid=a001010100000000").Data[1]  # 当日标的成分
+        selected_codes = selectStocks(target_list, t, engine)
+        print(selected_codes)
+        df = pd.DataFrame(columns=['selected_date', 'selected_code'])
+        df['selected_date'] = [date_str1 for i in selected_codes]
+        df['selected_code'] = selected_codes
+        df['shares'] = [0 for i in selected_codes]
+        df.to_sql('zztk', engine, if_exists='append', index=False,
+                  dtype={'date': String(20), 'selected_code': String(20)})  # 类型映射，增量入库
 #------------------------------------------------------------------------------ step2.当前持仓信息，以及满N日平仓(zztk_hold当前持仓表)列表
 #     to_sell_objects = to_sell(now, adjust_period, w)
 #     to_buy_objects = to_buy(now, adjust_period, w)
