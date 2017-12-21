@@ -98,8 +98,7 @@ def is_selected(code, date):
             if low[maxup_mark] < high[maxup_mark]:  # 不是一字涨停
                 break
             else:
-                maxup_mark = maxupordown[maxup_mark +
-                                         1:-1].index(1) + maxup_mark + 1
+                maxup_mark = maxupordown[maxup_mark + 1:-1].index(1) + maxup_mark + 1
         if maxup_mark == len(maxupordown) - 1:  # 如果是当日涨停，返回false
             return to_buy
         con1 = True
