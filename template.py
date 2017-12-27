@@ -386,28 +386,25 @@ if __name__ == '__main__':
     adjust_period = 5
 
     # 回测开始时间
-    start_date = '2017-12-01'
-    end_date = '2017-12-18'
+    start_date = '2017-12-26'
+    end_date = '2017-12-26'
     # 当前时间（每日下午4:20运行）
     now = datetime.datetime.now()
     date_str1 = now.strftime("%Y-%m-%d")
     date_str2 = now.strftime("%Y%m%d")
     w.start()  # 启动WIND
-    query = "SELECT count(*) FROM sqlite_master WHERE type='table'"
-    if cur.execute(query).fetchone()[0] == 0:  # 如果数据库为空，初始化数据库
-        init(start_date, end_date, engine)
-    else:
-        # update(start_date, end_date, engine) # 每日更新数据库
-        pass
-    # 获取期间交易日期
-    tradeDays = w.tdays(start_date, "2017-12-18", "").Data[0]
+#     query = "SELECT count(*) FROM sqlite_master WHERE type='table'"
+#     if cur.execute(query).fetchone()[0] == 0:  # 如果数据库为空，初始化数据库
+#         init(start_date, end_date, engine)
+#     else:
+#         # update(start_date, end_date, engine) # 每日更新数据库
+#         pass
+#     # 获取期间交易日期
+    tradeDays = w.tdays(start_date, end_date, "").Data[0]
     for t in tradeDays:
         #------------------------------------------------------------------------------ step1.选股，写入MySQL(zztk_result选股结果表)
         date_str1 = t.strftime("%Y-%m-%d")  
-        # 获取当前所有股票列表
-        target_list = w.wset("sectorconstituent", "date=" +
-                         date_str1 + ";sectorid=a001010100000000").Data[1]  # 当日标的成分
-        selected_codes = selectStocks(target_list, t, engine)
+        selected_codes = selectStocks(t)
         print(selected_codes)
         df = pd.DataFrame(columns=['selected_date', 'selected_code'])
         df['selected_date'] = [date_str1 for i in selected_codes]
